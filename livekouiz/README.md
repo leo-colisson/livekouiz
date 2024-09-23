@@ -20,8 +20,8 @@ To create a production version of your app, run:
 npm run build
 ```
 
-to build the front end (you can run `npm run preview` to test it, but the backend will not run). To build and also run the backend on the same port, run:
+to build the static version of the front end (you can run `npm run preview` to test it, but the backend will not run). To build and also run the backend on the same port, run:
 ```bash
-npm run build:run:prod
+npm run build:run
 ```
 (note that you may want to serve the static `build` directory from nginx directly, see https://github.com/szymmis/vite-express/issues/148 for SSR support)

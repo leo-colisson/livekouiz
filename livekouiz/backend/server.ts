@@ -38,75 +38,14 @@ const redisKeyQuestionSubscribe = (roomName) => `room-question-subscribe:${roomN
 
 // The GraphQL schema
 //import typeDefs from './schema.graphql'
-
-const typeDefs = `
-type Room {
-  name: String!
-  adminHashedPassword: String!
-  token: String!
+let typeDefs;
+import fs from 'fs';
+if (process.env.NODE_ENV === 'production') {
+  //import typeDefs from './schema.graphql'
+  typeDefs = (await import('./schema.graphql')).default;
+} else {
+  typeDefs = fs.readFileSync(import.meta.dirname + '/schema.graphql', 'utf8');
 }
-
-type QuestionMultipleChoice {
-  question: String
-  nbChoices: Int!
-}
-input QuestionMultipleChoiceInput {
-  question: String
-  nbChoices: Int!
-}
-
-type QuestionText {
-  question: String
-}
-input QuestionTextInput {
-  question: String
-}
-
-type QuestionNumber {
-  question: String
-}
-input QuestionNumberInput {
-  question: String
-}
-
-union Question = QuestionMultipleChoice | QuestionText | QuestionNumber
-# Note the greatest way to allow union type as input IMO... But that's graphQL life.
-input QuestionInput @oneOf {
-  QuestionMultipleChoice: QuestionMultipleChoiceInput
-  QuestionText: QuestionTextInput
-  QuestionNumber: QuestionNumberInput
-}
-
-### Errors
-
-type WrongPassword {
-  _: Boolean # Objects must be non-empty...
-}
-
-type WrongToken {
-  _: Boolean
-}
-
-type Success {
-  _: Boolean
-}
-
-type Query {
-  hello: String
-}
-
-type Subscription {
-  hello: String
-  questions(roomName: String!): Question
-}
-
-union NewRoomResult = Room | WrongPassword
-union NewQuestionResult = QuestionMultipleChoice | QuestionText | QuestionNumber | WrongToken
-type Mutation {
-  newRoom(roomName: String!, password: String!): NewRoomResult
-  newQuestion(roomName: String!, token: String!, question: QuestionInput!): NewQuestionResult
-}
-`;
 
 // A map of functions which return data for the schema.
 const resolvers = {
