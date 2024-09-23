@@ -1,0 +1,28 @@
+{
+  "dependencies": {
+    "@apollo/server": "^4.11.0",
+    "@graphql-tools/schema": "^10.0.6",
+    "bcrypt": "^5.1.1",
+    "graphql": "^16.9.0",
+    "graphql-redis-subscriptions": "^2.6.1",
+    "graphql-ws": "^5.16.0",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.0"
+  },
+  "name": "livekouiz-backend-apollo",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "scripts": {
+    "compile": "tsc",
+    "start": "npm run compile && node ./dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^22.5.5",
+    "typescript": "^5.6.2"
+  }
+}
