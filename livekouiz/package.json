@@ -6,12 +6,15 @@
         "dev": "nodemon -w backend/server.ts -w backend/**.graphql -x tsx backend/server.js",
         "dev:frontend": "vite dev",
         "build": "vite build",
+        "build:run:prod": "npm run build && NODE_ENV=production npx tsx backend/server.ts",
         "preview": "vite preview",
         "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
         "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
     },
     "devDependencies": {
         "@sveltejs/adapter-auto": "^3.0.0",
+        "@sveltejs/adapter-node": "^5.2.4",
+        "@sveltejs/adapter-static": "^3.0.5",
         "@sveltejs/kit": "^2.0.0",
         "@sveltejs/vite-plugin-svelte": "^3.0.0",
         "@types/express": "^4.17.15",

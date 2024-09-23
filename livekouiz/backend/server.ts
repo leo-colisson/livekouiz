@@ -234,6 +234,13 @@ httpServer.listen(PORT, () => {
   console.log(`Server is now running on http://localhost:${PORT}/graphql`);
 });
 
+ViteExpress.config({ 
+   inlineViteConfig: { 
+      base: "/", 
+      build: { outDir: "build" }
+   } 
+});
+
 ViteExpress.bind(app, httpServer);
 // 
 // 
