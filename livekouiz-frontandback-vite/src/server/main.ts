@@ -15,6 +15,7 @@ const pubsub = new RedisPubSub();
 import Redis from 'ioredis';
 //const Redis = require("ioredis");
 const redis = new Redis();
+import ViteExpress from 'vite-express';
 
 async function redis_get_obj_or_null(key) {
   const str = await redis.get(key);
@@ -36,20 +37,87 @@ const redisKeyQuestion = (roomName) => `room-question:${roomName}`;
 const redisKeyQuestionSubscribe = (roomName) => `room-question-subscribe:${roomName}`;
 
 // The GraphQL schema
-//import { readFileSync } from 'fs';
-//const typeDefs = readFileSync('./schema.graphql', { encoding: 'utf-8' });
-import typeDefs from './schema.graphql'
+//import typeDefs from './schema.graphql'
+
+const typeDefs = `
+type Room {
+  name: String!
+  adminHashedPassword: String!
+  token: String!
+}
+
+type QuestionMultipleChoice {
+  question: String
+  nbChoices: Int!
+}
+input QuestionMultipleChoiceInput {
+  question: String
+  nbChoices: Int!
+}
+
+type QuestionText {
+  question: String
+}
+input QuestionTextInput {
+  question: String
+}
+
+type QuestionNumber {
+  question: String
+}
+input QuestionNumberInput {
+  question: String
+}
+
+union Question = QuestionMultipleChoice | QuestionText | QuestionNumber
+# Note the greatest way to allow union type as input IMO... But that's graphQL life.
+input QuestionInput @oneOf {
+  QuestionMultipleChoice: QuestionMultipleChoiceInput
+  QuestionText: QuestionTextInput
+  QuestionNumber: QuestionNumberInput
+}
+
+### Errors
+
+type WrongPassword {
+  _: Boolean # Objects must be non-empty...
+}
+
+type WrongToken {
+  _: Boolean
+}
+
+type Success {
+  _: Boolean
+}
+
+type Query {
+  hello: String
+}
+
+type Subscription {
+  hello: String
+  questions(roomName: String!): Question
+}
+
+union NewRoomResult = Room | WrongPassword
+union NewQuestionResult = QuestionMultipleChoice | QuestionText | QuestionNumber | WrongToken
+type Mutation {
+  newRoom(roomName: String!, password: String!): NewRoomResult
+  newQuestion(roomName: String!, token: String!, question: QuestionInput!): NewQuestionResult
+}
+`;
 
 // A map of functions which return data for the schema.
 const resolvers = {
   Query: {
-    hello: () => 'wwoorld',
+    hello: () => 'world',
   },
   Subscription: {
     hello: {
       // Example using an async generator
       subscribe: async function* () {
-        for await (const word of ['Hello', 'Bonjour', 'Ciao']) {
+        for await (const word of ['Hello :)', 'Bonjour', 'Ciao']) {
           yield { hello: word };
         }
       },
@@ -125,17 +193,15 @@ const resolvers = {
 
 // Create an Express app and HTTP server; we will attach both the WebSocket
 // server and the ApolloServer to this HTTP server.
-export const app = express();
+const app = express();
 const httpServer = createServer(app);
 
 // Create our WebSocket server using the HTTP server we just set up.
 const wsServer = new WebSocketServer({
   server: httpServer,
-  //port: 4000,
   //  path: '/subscriptions',
   path: '/graphql',
 });
-wsServer.on('error', console.error);
 // Save the returned server's info so we can shutdown this server later
 const serverCleanup = useServer({ schema }, wsServer);
 
@@ -160,15 +226,17 @@ const server = new ApolloServer({
 });
 
 await server.start();
-var corsOptions = {
-  changeOrigin: true,
-}
-app.use('/graphql', cors<cors.CorsRequest>(corsOptions), express.json(), expressMiddleware(server));
+app.use('/graphql', cors<cors.CorsRequest>(), express.json(), expressMiddleware(server));
 
-if (!process.env['VITE']) { // When running from `vite` there is no need to call `app.listen`
-  const PORT = 4000;
-  // Now that our HTTP server is fully set up, we can listen to it.
-  httpServer.listen(PORT, () => {
-    console.log(`Server is now running on http://localhost:${PORT}/graphql`);
-  });
-}
+const PORT = 4042;
+// Now that our HTTP server is fully set up, we can listen to it.
+httpServer.listen(PORT, () => {
+  console.log(`Server is now running on http://localhost:${PORT}/graphql`);
+});
+
+ViteExpress.bind(app, httpServer);
+// 
+// 
+// ViteExpress.listen(httpServer, 3000, () =>
+//   console.log("Server is listening on port 3000..."),
+// );
