@@ -32,9 +32,23 @@ async function redis_set_obj(key, obj) {
 }
 
 // Redis key names
+const escapeColon = (key) => key.replaceAll(":", "::");
 const redisKeyRoom = (roomName) => `room-info:${roomName}`;
+const redisKeyUsers = (roomName, userName) => `room-users:${escapeColon(roomName)}-:-${escapeColon(userName)}`;
 const redisKeyQuestion = (roomName) => `room-question:${roomName}`;
 const redisKeyQuestionSubscribe = (roomName) => `room-question-subscribe:${roomName}`;
+const redisKeyRoomAcceptingAnswers = (roomName) => `room-accepting-answrs:${roomName}`;
+// This is a hset, with the key being the name of the user, and the key its answer
+const redisKeyListUserAnswers = (roomName) => `room-list-user-answers:${roomName}`
+
+async function redisCheckUserAuth(roomName, userName, userToken) {
+  const user = await redis_get_obj_or_null(redisKeyUsers(roomName, userName));
+  if (user === null) {
+    return False
+  } else {
+    return user.userToken === userToken
+  }
+}
 
 // The GraphQL schema
 //import typeDefs from './schema.graphql'
@@ -51,6 +65,17 @@ if (process.env.NODE_ENV === 'production') {
 const resolvers = {
   Query: {
     hello: () => 'world',
+    getAllAnswers: async (_, args) => {
+      const { roomName, token} = args;
+      const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+      if (room && room.token === token) {
+        const allAnswers = await redis.hgetall(redisKeyListUserAnswers(roomName));
+        console.log("allAnswers", allAnswers);
+        return Object.values(allAnswers).map(x => JSON.parse(x));
+      } else {
+        return {__typename: "BadAuthentification"}
+      }
+    },
   },
   Subscription: {
     hello: {
@@ -110,20 +135,85 @@ const resolvers = {
         }
       }
     },
+    newUser: async (_, args) => {
+      const {roomName, userName, password} = args;
+      const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+      if (room === null) {
+        return {__typename: "RoomDoesNotExist"}
+      } else {
+        const user = await redis_get_obj_or_null(redisKeyUsers(roomName, userName));
+        if (user === null) {
+          // We create the user
+          const salt = await bcrypt.genSalt();
+          const hashed = await bcrypt.hash(password, salt);
+          const token = uuidv4();
+          const u = {__typename: "User", roomName: roomName, userName: userName, hashedPassword: hashed, userToken: token};
+          await redis_set_obj(redisKeyUsers(roomName, userName), u);
+          return u
+        } else {
+          // The user already exists
+          const res = await bcrypt.compare(password, user.hashedPassword);
+          if (res) {
+            return user
+          } else {
+            return {__typename: "UserAlreadyRegistered"}
+          }
+        }
+      }
+    },
     newQuestion: async (_, args) => {
       const { roomName, token, question } = args;
       const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
       if (room && room.token === token) {
         const typename = Object.keys(question)[0];
-        const q = {...question[typename], __typename: typename};
+        const uuid = uuidv4();
+        const q = {...question[typename], uuid: uuid, __typename: typename};
         await redis_set_obj(redisKeyQuestion(roomName), q);
+        await redis.del(redisKeyListUserAnswers(roomName)); // Reset the questions
+        await redis_set_obj(redisKeyRoomAcceptingAnswers(roomName), "true");
         pubsub.publish(redisKeyQuestionSubscribe(roomName), q);
         return q;
       } else {
         return {__typename: "WrongToken"};
       }
-    }
-  },
+    },
+    newAnswer: async (_, args) => {
+      const { roomName, questionUuid, userName, userToken, answer } = args;
+      const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+      if (room === null) {
+        return {__typename: "RoomDoesNotExist"}
+      } else {
+        const question = await redis_get_obj_or_null(redisKeyQuestion(roomName));
+        if (question === null || question.uuid != questionUuid) {
+          return {__typename: "QuestionDoesNotExist"}
+        } else {
+          if (!redisCheckUserAuth(roomName, userName, userToken)) {
+            return { __typename: "BadAuthentification" }
+          } else {
+            const acceptNew = await redis_get_obj_or_null(redisKeyRoomAcceptingAnswers(roomName));
+            if (acceptNew !== "true") {
+              return {__typename: "TimeIsOut"}
+            } else {
+              const uuid = uuidv4();
+              const ans = {...answer, uuid: uuid, userName: userName, __typename: "QuestionAnswer"};
+              await redis.hset(redisKeyListUserAnswers(roomName), userName, JSON.stringify(ans));
+              return ans
+            }
+          }
+        }
+      }
+    },
+    timeIsOut: async (_, args) => {
+      const { roomName, token} = args;
+      const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+      if (room && room.token === token) {
+        await redis_set_obj(redisKeyRoomAcceptingAnswers(roomName), "false");
+        return {__typename: "Success" }
+      } else {
+        return {__typename: "BadAuthentification"}
+      }
+    },
+  }
 };
 
   // Create the schema, which will be used separately by ApolloServer and
