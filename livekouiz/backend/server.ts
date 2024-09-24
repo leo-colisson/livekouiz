@@ -41,7 +41,17 @@ const redisKeyRoomAcceptingAnswers = (roomName) => `room-accepting-answrs:${room
 // This is a hset, with the key being the name of the user, and the key its answer
 const redisKeyListUserAnswers = (roomName) => `room-list-user-answers:${roomName}`
 // Outputs just {newAnswer: true}, then we re-fetch the whole list of answers manually
-const redisKeyNewAnswerChannel = (roomName) => `room-new-answer:${roomName}`
+const redisKeyNewAnswerSubscribe = (roomName) => `room-new-answer:${roomName}`
+// Send a message there when a new person connects or disconnect
+const redisKeyNewConnectionSubscribe = (roomName) => `room-new-connection:${roomName}`
+// Stores the number of connected users for each graphql client. We can't just use NUMSUB on a channel
+// because a single backend server may use a single subscription to the redis server even if many clients are listenning to it.
+// Instead, each server will have their own variable (key in hash table), maintaining themself the number of connections they had.
+// We need a separate key per server to avoid issues if a server dies. We use HEXPIRE to remove keys after some time (like 1mn),
+// and each server regurarly calls HEXPIRE to notify they are still alive.
+const redisKeyHashTableNbConnectedCliends = (roomName) => `room-nb-connected-client-per-server:${roomName}`
+const serverUuid = uuidv4();
+console.log("Server uuid: " + serverUuid)
 
 async function redisCheckUserAuth(roomName, userName, userToken) {
   const user = await redis_get_obj_or_null(redisKeyUsers(roomName, userName));
@@ -91,10 +101,13 @@ const resolvers = {
     questions: {
       //subscribe: (_, args) => pubsub.asyncIterator(redisKeyQuestionSubscribe(args.roomName)),
       subscribe: async function* (_, args) {
+        const { roomName } = args;
+        // Tell others that a new user connected the room
+        pubsub.publish(redisKeyNewConnectionSubscribe(roomName), {newConnection: true});
         // Fetch the initial question from Redis
-        const question = await redis_get_obj_or_null(redisKeyQuestion(args.roomName));
+        const question = await redis_get_obj_or_null(redisKeyQuestion(roomName));
         yield {questions: question};
-        const iterMessages = pubsub.asyncIterator(redisKeyQuestionSubscribe(args.roomName));
+        const iterMessages = pubsub.asyncIterator(redisKeyQuestionSubscribe(roomName));
         while (true) {
           const message = await iterMessages.next();
           console.log("message", message)
@@ -115,7 +128,7 @@ const resolvers = {
           const allAnswers = await redis.hgetall(redisKeyListUserAnswers(roomName));
           yield {answers: {__typename: "QuestionAnswerList",
                            answers: Object.values(allAnswers).map(x => JSON.parse(x))}}
-          const iterMessages = pubsub.asyncIterator(redisKeyNewAnswerChannel(args.roomName));
+          const iterMessages = pubsub.asyncIterator(redisKeyNewAnswerSubscribe(args.roomName));
           while (true) {
             const message = await iterMessages.next();
             console.log("message", message)
@@ -128,6 +141,26 @@ const resolvers = {
           }
         } else {
           yield {answers: {__typename: "BadAuthentification"}}
+        }
+      },
+    },
+    nbPeopleInRoom: {
+      subscribe: async function* (_, args) {
+        const { roomName } = args;
+        // var channelAndn = await redis.pubsub("NUMSUB", redisKeyQuestionSubscribe(roomName));
+        // var n = channelAndn[1]
+        var allServersConnectedClients = await redis.hgetall(redisKeyHashTableNbConnectedCliends(roomName));
+        console.log("allServersConnectedClients", allServersConnectedClients);
+        var n = Object.values(allServersConnectedClients).map(x => parseInt(x)).reduce((a, b) => a + b, 0)
+        console.log("n=", n)
+        yield {nbPeopleInRoom: n}
+        const iterMessages = pubsub.asyncIterator(redisKeyNewConnectionSubscribe(roomName));
+        while (true) {
+          const message = await iterMessages.next();
+        var allServersConnectedClients = await redis.hgetall(redisKeyHashTableNbConnectedCliends(roomName));
+          n = Object.values(allServersConnectedClients).map(x => parseInt(x)).reduce((a, b) => a + b, 0)
+          console.log("n=", n)
+          yield {nbPeopleInRoom: n}
         }
       },
     },
@@ -224,7 +257,7 @@ const resolvers = {
               const uuid = uuidv4();
               const ans = {...answer, uuid: uuid, userName: userName, __typename: "QuestionAnswer"};
               await redis.hset(redisKeyListUserAnswers(roomName), userName, JSON.stringify(ans));
-              pubsub.publish(redisKeyNewAnswerChannel(roomName), {newAnswer: true});
+              pubsub.publish(redisKeyNewAnswerSubscribe(roomName), {newAnswer: true});
               return ans
             }
           }
@@ -259,8 +292,59 @@ const wsServer = new WebSocketServer({
   //  path: '/subscriptions',
   path: '/graphql',
 });
+// Count the number of connected clients per room for this server, to know when to start/stop
+// This maps roomName to number of users
+const connectedUsers = {};
+
+// We notify the server that we are still connected every minute, by renewing the expire time of the corresponding keys
+setInterval(function() {
+  for (const roomName in connectedUsers) {
+    redis.call("HEXPIRE", redisKeyHashTableNbConnectedCliends(roomName), 2*60, "FIELDS", 1, serverUuid);
+    pubsub.publish(redisKeyNewConnectionSubscribe(roomName), {inCaseStuffExpired: true});
+  }
+}, 60 * 1000);
+
 // Save the returned server's info so we can shutdown this server later
-const serverCleanup = useServer({ schema }, wsServer);
+const serverCleanup = useServer({
+  schema,
+  onSubscribe: async (ctx, message) => {
+    ctx.livekouizID = uuidv4();
+    if (message?.type === "subscribe" && message?.payload?.variables?.roomName && message?.payload?.operationName === "Questions") {
+      // A user is connecting! Let's save the name of the room to disconnect it later, and add it to the list of users.
+      const roomName = message.payload.variables.roomName;
+      const x = connectedUsers?.roomName || 0;
+      connectedUsers[roomName] = x + 1;
+      await (redis.multi()
+                  .hincrby(redisKeyHashTableNbConnectedCliends(roomName), serverUuid, 1)
+                  .call("HEXPIRE", redisKeyHashTableNbConnectedCliends(roomName), 2*60, "FIELDS", 1, serverUuid)
+                  .exec())
+      ;
+      ctx.livekouizRoomToDisconnect = roomName;
+      console.log("New client entering " + roomName)
+    }
+    console.log("subcribed user", ctx, message)
+    console.log("ctx.connectionParams", ctx.connectionParams)
+  },
+  onDisconnect: async (ctx) => {
+    if (ctx?.livekouizRoomToDisconnect) {
+      const roomName = ctx.livekouizRoomToDisconnect;
+      pubsub.publish(redisKeyNewConnectionSubscribe(roomName), {newDisconnection: true});
+      const x = connectedUsers?.roomName || 0;
+      connectedUsers[roomName] = x - 1;
+      await (redis.multi()
+                  .hincrby(redisKeyHashTableNbConnectedCliends(roomName), serverUuid, -1)
+                  .call("HEXPIRE", redisKeyHashTableNbConnectedCliends(roomName), 2*60, "FIELDS", 1, serverUuid)
+                  .exec());
+      // We clean it to remove empty rooms
+      for (const key in connectedUsers) {
+        if (connectedUsers[key] <= 0) {
+          delete connectedUsers[key];
+        }
+      }
+      console.log("disconnecting a user");
+    }
+  }
+}, wsServer);
 
 // Set up ApolloServer.
 const server = new ApolloServer({
