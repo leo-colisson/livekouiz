@@ -40,6 +40,8 @@ const redisKeyQuestionSubscribe = (roomName) => `room-question-subscribe:${roomN
 const redisKeyRoomAcceptingAnswers = (roomName) => `room-accepting-answrs:${roomName}`;
 // This is a hset, with the key being the name of the user, and the key its answer
 const redisKeyListUserAnswers = (roomName) => `room-list-user-answers:${roomName}`
+// Outputs just {newAnswer: true}, then we re-fetch the whole list of answers manually
+const redisKeyNewAnswerChannel = (roomName) => `room-new-answer:${roomName}`
 
 async function redisCheckUserAuth(roomName, userName, userToken) {
   const user = await redis_get_obj_or_null(redisKeyUsers(roomName, userName));
@@ -103,6 +105,31 @@ const resolvers = {
         //   yield message;
         // }
       }
+    },
+    answers: {
+      //subscribe: (_, args) => pubsub.asyncIterator(redisKeyQuestionSubscribe(args.roomName)),
+      subscribe: async function* (_, args) {
+        const {roomName, token} = args;
+        const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+        if (room && room.token === token) {
+          const allAnswers = await redis.hgetall(redisKeyListUserAnswers(roomName));
+          yield {answers: {__typename: "QuestionAnswerList",
+                           answers: Object.values(allAnswers).map(x => JSON.parse(x))}}
+          const iterMessages = pubsub.asyncIterator(redisKeyNewAnswerChannel(args.roomName));
+          while (true) {
+            const message = await iterMessages.next();
+            console.log("message", message)
+            if(message.value.newAnswer) {
+              const allAnswers = await redis.hgetall(redisKeyListUserAnswers(roomName));
+              yield {answers: {__typename: "QuestionAnswerList",
+                               answers: Object.values(allAnswers).map(x => JSON.parse(x))}}
+            }
+            //yield message.value
+          }
+        } else {
+          yield {answers: {__typename: "BadAuthentification"}}
+        }
+      },
     },
   },
   Mutation: {
@@ -197,6 +224,7 @@ const resolvers = {
               const uuid = uuidv4();
               const ans = {...answer, uuid: uuid, userName: userName, __typename: "QuestionAnswer"};
               await redis.hset(redisKeyListUserAnswers(roomName), userName, JSON.stringify(ans));
+              pubsub.publish(redisKeyNewAnswerChannel(roomName), {newAnswer: true});
               return ans
             }
           }
