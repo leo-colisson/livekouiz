@@ -19,7 +19,6 @@ import ViteExpress from 'vite-express';
 
 async function redis_get_obj_or_null(key) {
   const str = await redis.get(key);
-  console.log("str", str)
   if (str) {
     return JSON.parse(str)
   } else {
@@ -35,8 +34,12 @@ async function redis_set_obj(key, obj) {
 const escapeColon = (key) => key.replaceAll(":", "::");
 const redisKeyRoom = (roomName) => `room-info:${roomName}`;
 const redisKeyUsers = (roomName, userName) => `room-users:${escapeColon(roomName)}-:-${escapeColon(userName)}`;
+const redisKeyLastQuestionId = (roomName) => `room-last-question-id:${roomName}`;
 const redisKeyQuestion = (roomName) => `room-question:${roomName}`;
 const redisKeyQuestionSubscribe = (roomName) => `room-question-subscribe:${roomName}`;
+const redisKeySolution = (roomName) => `room-solution:${roomName}`;
+const redisKeySolutionSubscribe = (roomName) => `room-solution-subscribe:${roomName}`;
+const redisKeyScoreSubscribe = (roomName) => `room-score-subscribe:${roomName}`;
 const redisKeyRoomAcceptingAnswers = (roomName) => `room-accepting-answrs:${roomName}`;
 // This is a hset, with the key being the name of the user, and the key its answer
 const redisKeyListUserAnswers = (roomName) => `room-list-user-answers:${roomName}`
@@ -50,6 +53,10 @@ const redisKeyNewConnectionSubscribe = (roomName) => `room-new-connection:${room
 // We need a separate key per server to avoid issues if a server dies. We use HEXPIRE to remove keys after some time (like 1mn),
 // and each server regurarly calls HEXPIRE to notify they are still alive.
 const redisKeyHashTableNbConnectedCliends = (roomName) => `room-nb-connected-client-per-server:${roomName}`
+// Stores the scores in a hash table room-scores:roomName question > {userName: score}
+const redisKeyScores = (roomName) => `room-scores:${roomName}`
+
+
 const serverUuid = uuidv4();
 console.log("Server uuid: " + serverUuid)
 
@@ -82,7 +89,6 @@ const resolvers = {
       const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
       if (room && room.token === token) {
         const allAnswers = await redis.hgetall(redisKeyListUserAnswers(roomName));
-        console.log("allAnswers", allAnswers);
         return Object.values(allAnswers).map(x => JSON.parse(x));
       } else {
         return {__typename: "BadAuthentification"}
@@ -99,7 +105,6 @@ const resolvers = {
       },
     },
     questions: {
-      //subscribe: (_, args) => pubsub.asyncIterator(redisKeyQuestionSubscribe(args.roomName)),
       subscribe: async function* (_, args) {
         const { roomName } = args;
         // Tell others that a new user connected the room
@@ -110,7 +115,6 @@ const resolvers = {
         const iterMessages = pubsub.asyncIterator(redisKeyQuestionSubscribe(roomName));
         while (true) {
           const message = await iterMessages.next();
-          console.log("message", message)
           yield {questions: message.value}
           //yield message.value
         }
@@ -120,7 +124,6 @@ const resolvers = {
       }
     },
     answers: {
-      //subscribe: (_, args) => pubsub.asyncIterator(redisKeyQuestionSubscribe(args.roomName)),
       subscribe: async function* (_, args) {
         const {roomName, token} = args;
         const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
@@ -131,7 +134,6 @@ const resolvers = {
           const iterMessages = pubsub.asyncIterator(redisKeyNewAnswerSubscribe(args.roomName));
           while (true) {
             const message = await iterMessages.next();
-            console.log("message", message)
             if(message.value.newAnswer) {
               const allAnswers = await redis.hgetall(redisKeyListUserAnswers(roomName));
               yield {answers: {__typename: "QuestionAnswerList",
@@ -144,22 +146,60 @@ const resolvers = {
         }
       },
     },
+    solution: {
+      subscribe: async function* (_, args) {
+        const { roomName } = args;
+        // Fetch the initial question from Redis
+        const solution = await redis_get_obj_or_null(redisKeySolution(roomName));
+        yield {solution: solution};
+        const iterMessages = pubsub.asyncIterator(redisKeySolutionSubscribe(roomName));
+        while (true) {
+          const message = await iterMessages.next();
+          yield {solution: message.value}
+        }
+      }
+    },
+    scores: {
+      subscribe: async function* (_, args) {
+        const { roomName } = args;
+        // Fetch the initial question from Redis
+        const scores_dict = await redis.hgetall(redisKeyScores(roomName));
+        const scores = Object.keys(scores_dict).map(uuid => {
+          const dictUserScore = JSON.parse(scores_dict[uuid]);
+          return Object.keys(dictUserScore).map(userName => ({
+            questionUuid: uuid,
+            userName: userName,
+            score: dictUserScore[userName]
+          }));
+        }).flat();
+        yield {scores: scores};
+        const iterMessages = pubsub.asyncIterator(redisKeyScoreSubscribe(roomName));
+        while (true) {
+          const message = await iterMessages.next();
+          const scores_dict = await redis.hgetall(redisKeyScores(roomName));
+          const scores = Object.keys(scores_dict).map(uuid => {
+            const dictUserScore = JSON.parse(scores_dict[uuid]);
+            return Object.keys(dictUserScore).map(userName => ({
+              questionUuid: uuid,
+              userName: userName,
+              score: dictUserScore[userName]
+            }));
+          }).flat();
+          yield {scores: scores};
+        }
+      }
+    },
     nbPeopleInRoom: {
       subscribe: async function* (_, args) {
         const { roomName } = args;
-        // var channelAndn = await redis.pubsub("NUMSUB", redisKeyQuestionSubscribe(roomName));
-        // var n = channelAndn[1]
         var allServersConnectedClients = await redis.hgetall(redisKeyHashTableNbConnectedCliends(roomName));
-        console.log("allServersConnectedClients", allServersConnectedClients);
         var n = Object.values(allServersConnectedClients).map(x => parseInt(x)).reduce((a, b) => a + b, 0)
-        console.log("n=", n)
         yield {nbPeopleInRoom: n}
         const iterMessages = pubsub.asyncIterator(redisKeyNewConnectionSubscribe(roomName));
         while (true) {
           const message = await iterMessages.next();
         var allServersConnectedClients = await redis.hgetall(redisKeyHashTableNbConnectedCliends(roomName));
           n = Object.values(allServersConnectedClients).map(x => parseInt(x)).reduce((a, b) => a + b, 0)
-          console.log("n=", n)
           yield {nbPeopleInRoom: n}
         }
       },
@@ -168,9 +208,7 @@ const resolvers = {
   Mutation: {
     newRoom: async (_, args) => {
       const {roomName, password} = args;
-      console.log(roomName)
       const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
-      console.log("foo", room)
       if (room === null) {
         // We create the room
         const salt = await bcrypt.genSalt();
@@ -182,8 +220,6 @@ const resolvers = {
           adminHashedPassword: hashed,
           token: token
         }
-        console.log("hashed", hashed)
-        console.log("hashed", hashed)
         redis_set_obj(redisKeyRoom(roomName), newRoom);
         return newRoom
       } else {
@@ -225,8 +261,8 @@ const resolvers = {
       const { roomName, token, question } = args;
       const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
       if (room && room.token === token) {
+        const uuid = redis.incr(redisKeyLastQuestionId(roomName));
         const typename = Object.keys(question)[0];
-        const uuid = uuidv4();
         const q = {...question[typename], uuid: uuid, __typename: typename};
         await redis_set_obj(redisKeyQuestion(roomName), q);
         await redis.del(redisKeyListUserAnswers(roomName)); // Reset the questions
@@ -264,11 +300,45 @@ const resolvers = {
         }
       }
     },
+    newSolution: async (_, args) => {
+      const { roomName, token, questionUuid, solution } = args;
+      const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+      if (room && room.token === token) {
+        const q = {__typename: "Solution", questionUuid: questionUuid, solution: solution};
+        await redis_set_obj(redisKeySolution(roomName), q);
+        pubsub.publish(redisKeySolutionSubscribe(roomName), q);
+        return q;
+      } else {
+        return {__typename: "WrongToken"};
+      }
+    },
     timeIsOut: async (_, args) => {
       const { roomName, token} = args;
       const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
       if (room && room.token === token) {
         await redis_set_obj(redisKeyRoomAcceptingAnswers(roomName), "false");
+        return {__typename: "Success" }
+      } else {
+        return {__typename: "BadAuthentification"}
+      }
+    },
+    setScores: async (_, args) => {
+      const { roomName, token, questionUuid, scores } = args;
+      const room = await redis_get_obj_or_null(redisKeyRoom(roomName));
+      if (room && room.token === token) {
+        const oldScores = await redis.hget(redisKeyScores(roomName), questionUuid);
+        var oldScoresParsed = {};
+        // We replace existing scores with new ones
+        if(oldScores) {
+          oldScoresParsed = JSON.parse(oldScores)
+          // oldScoresParsed = Object.keys(oldScoresParsed0).map(userName => ({
+          //   userName: userName,
+          //   score: oldScoresParsed0[userName]
+          // }));
+        }
+        const newScoresDict = scores.reduce((h, {userName, score}) => ({...h, [userName]: score}), oldScoresParsed)
+        await redis.hset(redisKeyScores(roomName), questionUuid, JSON.stringify(newScoresDict));
+        redis.publish(redisKeyScoreSubscribe(roomName), {updatedScores: true})
         return {__typename: "Success" }
       } else {
         return {__typename: "BadAuthentification"}
@@ -320,10 +390,7 @@ const serverCleanup = useServer({
                   .exec())
       ;
       ctx.livekouizRoomToDisconnect = roomName;
-      console.log("New client entering " + roomName)
     }
-    console.log("subcribed user", ctx, message)
-    console.log("ctx.connectionParams", ctx.connectionParams)
   },
   onDisconnect: async (ctx) => {
     if (ctx?.livekouizRoomToDisconnect) {
@@ -341,7 +408,6 @@ const serverCleanup = useServer({
           delete connectedUsers[key];
         }
       }
-      console.log("disconnecting a user");
     }
   }
 }, wsServer);
